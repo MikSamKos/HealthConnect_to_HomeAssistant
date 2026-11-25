@@ -1,7 +1,11 @@
 package me.ayra.ha.healthconnect.utils
 
 import android.content.Context
+import androidx.health.connect.client.records.ExerciseRouteResult
+import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.SleepSessionRecord
+import androidx.health.connect.client.records.StepsRecord
+import java.time.ZoneId
 import me.ayra.ha.healthconnect.data.Settings.getSettings
 import me.ayra.ha.healthconnect.data.Settings.getSyncDays
 import me.ayra.ha.healthconnect.utils.FitUtils.toExerciseName
@@ -98,8 +102,22 @@ class HealthData(
 
             val duration = session.endTime.epochSecond - session.startTime.epochSecond
 
+            val route = session.routePoints()
+            val routeDistance = route?.let { routeLengthMeters(it) }
+            val distance = hc.getSessionDistance(session) ?: routeDistance
+            val sessionBpm = hc.getSessionHeartRate(session)
+
             sessionsList.add(
                 mapOf(
+                    "dataOrigin" to session.metadata.dataOrigin.packageName,
+                    "distance" to distance?.let { Math.round(it) },
+                    "routeStatus" to session.routeStatus(),
+                    "routeDistance" to routeDistance?.let { Math.round(it) },
+                    "routePoints" to route?.size,
+                    "heartRateAvg" to sessionBpm.takeIf { it.isNotEmpty() }?.average()?.let { Math.round(it) },
+                    "heartRateMax" to sessionBpm.maxOrNull(),
+                    "heartRateMin" to sessionBpm.minOrNull(),
+                    "route" to route?.let { downsample(it, MAX_ROUTE_POINTS) },
                     "startTime" to session.startTime.epochSecond,
                     "endTime" to session.endTime.epochSecond,
                     "duration" to duration,
@@ -126,6 +144,10 @@ class HealthData(
                 data["totalSessions"] = currentSessions + 1
                 data["totalDuration"] = currentDuration + duration
                 data["totalDurationFormatted"] = (currentDuration + duration).toTimeCount()
+                if (distance != null) {
+                    val currentDistance = (data["totalDistance"] as? Long) ?: 0L
+                    data["totalDistance"] = currentDistance + Math.round(distance)
+                }
             }
         }
 
@@ -138,25 +160,18 @@ class HealthData(
     ): Map<String, Any?>? {
         val resultMap = mutableMapOf<String, MutableMap<String, Any>>()
 
-        // Process steps data
-        hc.getSteps(days)?.forEach { record ->
-            val date = dayTimestamp(record.startTime.epochSecond) ?: "unknown"
-            val dateData =
-                resultMap.getOrPut(date) {
-                    mutableMapOf(
-                        "startTime" to record.startTime.epochSecond,
-                        "endTime" to record.endTime.epochSecond,
-                        "count" to 0L,
-                    )
-                }
-
-            val currentStartTime = dateData["startTime"] as Long
-            val currentEndTime = dateData["endTime"] as Long
-            val currentCount = dateData["count"] as Long
-
-            dateData["startTime"] = minOf(currentStartTime, record.startTime.epochSecond)
-            dateData["endTime"] = maxOf(currentEndTime, record.endTime.epochSecond)
-            dateData["count"] = currentCount + record.count
+        // Daily totals via Health Connect aggregation (de-duplicated across apps)
+        val zone = ZoneId.systemDefault()
+        hc.getDailySteps(days)?.forEach { day ->
+            val count = day.result[StepsRecord.COUNT_TOTAL] ?: return@forEach
+            val startEpoch = day.startTime.atZone(zone).toEpochSecond()
+            val date = dayTimestamp(startEpoch) ?: "unknown"
+            resultMap[date] =
+                mutableMapOf<String, Any>(
+                    "startTime" to startEpoch,
+                    "endTime" to day.endTime.atZone(zone).toEpochSecond() - 1,
+                    "count" to count,
+                )
         }
 
         if (resultMap.isEmpty()) {
@@ -464,4 +479,50 @@ class HealthData(
 
         return resultMap
     }
+}
+
+// Max route points sent per session; keeps the HA state attributes reasonably small.
+private const val MAX_ROUTE_POINTS = 400
+
+/** Route as [lat, lon] pairs rounded to ~1 m, or null if not readable / not recorded. */
+private fun ExerciseSessionRecord.routePoints(): List<List<Double>>? {
+    val result = exerciseRouteResult
+    if (result !is ExerciseRouteResult.Data) return null
+    val points = result.exerciseRoute.route
+    if (points.isEmpty()) return null
+    return points.map { listOf(round5(it.latitude), round5(it.longitude)) }
+}
+
+/** "ok", "noData" or "consentRequired" (READ_EXERCISE_ROUTES not granted). */
+private fun ExerciseSessionRecord.routeStatus(): String =
+    when (exerciseRouteResult) {
+        is ExerciseRouteResult.Data -> "ok"
+        is ExerciseRouteResult.ConsentRequired -> "consentRequired"
+        else -> "noData"
+    }
+
+private fun round5(v: Double): Double = Math.round(v * 100000.0) / 100000.0
+
+/** Keeps first and last point and evenly spaced points between them. */
+private fun <T> downsample(points: List<T>, max: Int): List<T> {
+    if (points.size <= max) return points
+    val step = (points.size - 1).toDouble() / (max - 1)
+    return (0 until max).map { points[Math.round(it * step).toInt()] }
+}
+
+/** Haversine length of the full (not downsampled) route in meters. */
+private fun routeLengthMeters(points: List<List<Double>>): Double {
+    var total = 0.0
+    for (i in 1 until points.size) {
+        val (lat1, lon1) = points[i - 1]
+        val (lat2, lon2) = points[i]
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a =
+            Math.sin(dLat / 2).let { it * it } +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLon / 2).let { it * it }
+        total += 2 * 6371000.0 * Math.asin(Math.sqrt(a))
+    }
+    return total
 }

@@ -1,0 +1,47 @@
+name: Build debug APK
+
+# Builds an installable debug APK without any repository secrets.
+# A throwaway signing key is generated on every run, so each new build
+# must be installed over the previous one by uninstalling it first
+# (or keep the same key by adding the secrets used in build.yaml).
+
+on:
+  workflow_dispatch:
+  push:
+
+jobs:
+  assemble-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Create throwaway signing key
+        run: |
+          mkdir -p app/keystore
+          keytool -genkeypair -v -keystore app/keystore/build.keystore \
+            -alias debugkey -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass android -keypass android \
+            -dname "CN=Debug, O=Local, C=FI"
+          cat <<PROPERTIES > app/keystore/keystore.properties
+          storeFile=keystore/build.keystore
+          storePassword=android
+          keyAlias=debugkey
+          keyPassword=android
+          PROPERTIES
+
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

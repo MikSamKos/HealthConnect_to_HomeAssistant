@@ -41,17 +41,26 @@ import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.Vo2MaxRecord
 import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.records.WheelchairPushesRecord
+import androidx.health.connect.client.aggregate.AggregationResultGroupedByPeriod
+import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
+import androidx.health.connect.client.request.AggregateRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import me.ayra.ha.healthconnect.data.DEFAULT_SYNC_DAYS
 import me.ayra.ha.healthconnect.data.MAX_SYNC_DAYS
 import me.ayra.ha.healthconnect.data.MIN_SYNC_DAYS
 import java.time.Instant
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.Period
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
 private val backgroundPermission = HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND
+
+// Lets the app read GPS routes of exercise sessions without per-session consent.
+// Kept out of readPermissions on purpose: denying it must not break the rest of the sync.
+const val EXERCISE_ROUTES_PERMISSION = "android.permission.health.READ_EXERCISE_ROUTES"
 
 private val readPermissions =
     setOf(
@@ -95,6 +104,7 @@ val healthConnectPermissions: Set<String> =
     linkedSetOf<String>().apply {
         add(backgroundPermission)
         addAll(readPermissions)
+        add(EXERCISE_ROUTES_PERMISSION)
     }
 
 val healthConnectReadPermissions: Set<String> = readPermissions
@@ -283,6 +293,73 @@ class HealthConnectManager(
             }
         return fetchedData.records
     }
+
+    /**
+     * Total distance (meters) recorded during [session] by the same app that wrote the session,
+     * or null if that app wrote no distance data for it.
+     */
+    suspend fun getSessionDistance(session: ExerciseSessionRecord): Double? =
+        try {
+            val result =
+                healthConnectClient.aggregate(
+                    AggregateRequest(
+                        metrics = setOf(DistanceRecord.DISTANCE_TOTAL),
+                        timeRangeFilter = TimeRangeFilter.between(session.startTime, session.endTime),
+                        dataOriginFilter = setOf(session.metadata.dataOrigin),
+                    ),
+                )
+            result[DistanceRecord.DISTANCE_TOTAL]?.inMeters
+        } catch (e: Exception) {
+            Log.e("HealthConnect", "Distance aggregate failed: ${e.message}")
+            null
+        }
+
+    /**
+     * Daily step totals using Health Connect's own aggregation, which de-duplicates overlapping
+     * data from several apps (e.g. phone + watch) according to the app priority set in
+     * Health Connect. Summing raw StepsRecords instead counts the same steps once per app.
+     */
+    suspend fun getDailySteps(days: Long = DEFAULT_SYNC_DAYS): List<AggregationResultGroupedByPeriod>? =
+        try {
+            val start = LocalDate.now().minusDays(sanitizeDays(days) - 1).atStartOfDay()
+            healthConnectClient.aggregateGroupByPeriod(
+                AggregateGroupByPeriodRequest(
+                    metrics = setOf(StepsRecord.COUNT_TOTAL),
+                    timeRangeFilter = TimeRangeFilter.between(start, LocalDateTime.now()),
+                    timeRangeSlicer = Period.ofDays(1),
+                ),
+            )
+        } catch (e: Exception) {
+            Log.e("HealthConnect", "Steps aggregate failed: ${e.message}")
+            null
+        }
+
+    /**
+     * Heart rate samples (bpm) recorded during [session], from any app. Read per session so the
+     * page-size limit of readRecords is never hit even with all-day heart rate data.
+     */
+    suspend fun getSessionHeartRate(session: ExerciseSessionRecord): List<Long> =
+        try {
+            val request =
+                ReadRecordsRequest(
+                    recordType = HeartRateRecord::class,
+                    timeRangeFilter = TimeRangeFilter.between(session.startTime, session.endTime),
+                )
+            healthConnectClient
+                .readRecords(request)
+                .records
+                .flatMap { it.samples }
+                .filter { !it.time.isBefore(session.startTime) && !it.time.isAfter(session.endTime) }
+                .map { it.beatsPerMinute }
+        } catch (e: Exception) {
+            Log.e("HealthConnect", "Session heart rate read failed: ${e.message}")
+            emptyList()
+        }
+
+    suspend fun hasExerciseRoutePermission(): Boolean =
+        healthConnectClient.permissionController
+            .getGrantedPermissions()
+            .contains(EXERCISE_ROUTES_PERMISSION)
 
     suspend fun getOxygenSaturation(days: Long = DEFAULT_SYNC_DAYS): List<OxygenSaturationRecord>? {
         val currentZoneId = ZoneId.systemDefault()
