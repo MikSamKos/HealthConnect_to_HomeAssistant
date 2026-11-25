@@ -28,7 +28,7 @@ android {
     defaultConfig {
         applicationId = "me.ayra.ha.healthconnect"
         minSdk = 26
-        targetSdk = 33
+        targetSdk = 35
         versionCode = 5
         versionName = "0.4.1"
 

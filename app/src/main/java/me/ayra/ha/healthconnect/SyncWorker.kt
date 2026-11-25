@@ -134,7 +134,13 @@ class SyncWorker(
 
         val notificationManager = context.getSystemService(NotificationManager::class.java)
 
-        setForeground(createForegroundInfo(notificationManager))
+        // With targetSdk 34+ a "health" foreground service may be refused (e.g. missing runtime
+        // permission). The sync itself does not need it, so carry on without it.
+        try {
+            setForeground(createForegroundInfo(notificationManager))
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not start foreground sync: ${e.message}")
+        }
         showSyncNotification(notificationManager)
 
         var attempt = 0
