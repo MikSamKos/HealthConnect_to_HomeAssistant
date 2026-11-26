@@ -81,7 +81,7 @@
 
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"
-            android:foregroundServiceType="health"
+            android:foregroundServiceType="health|dataSync"
             tools:node="merge" />
 
         <service

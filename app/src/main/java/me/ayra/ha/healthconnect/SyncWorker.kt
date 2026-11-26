@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.RemoteException
 import android.provider.Settings
 import android.util.Log
+import android.content.pm.ServiceInfo
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.work.Constraints
@@ -241,8 +242,18 @@ class SyncWorker(
         }
     }
 
+    // targetSdk 34+ requires an explicit foreground service type. "dataSync" needs no extra
+    // runtime permission (unlike "health"), and a sync run is short.
     private fun createForegroundInfo(notificationManager: NotificationManager?): ForegroundInfo =
-        ForegroundInfo(FOREGROUND_NOTIFICATION_ID, buildNotification(notificationManager))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ForegroundInfo(
+                FOREGROUND_NOTIFICATION_ID,
+                buildNotification(notificationManager),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            ForegroundInfo(FOREGROUND_NOTIFICATION_ID, buildNotification(notificationManager))
+        }
 
     private fun showSyncNotification(notificationManager: NotificationManager?): Boolean {
         if (notificationManager == null) {
